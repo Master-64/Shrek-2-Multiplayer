@@ -4,21 +4,12 @@
 // *   May be modified but not without proper credit!  *
 // *****************************************************
 // 
-// * Destruction support -- [Difficulty: 2/5] When an actor is destroyed on any client, make sure it is destroyed for everyone else
-// * Disable client controller(s) -- [Difficulty: 2.5/5] Make sure other players cannot automatically run logic on their own from another client's perspective
-// * Global console commands -- [Difficulty: 1/5] Add support for a chat command that can run a console command across all clients
-// * No pausing -- [Difficulty: 1/5] Make sure the game is unable to pause. This should be the case, as it's a live server
-// * Touch support -- [Difficulty: 2/5] When a client touches any important actor, make sure that code is ran for everyone else
-// * Frontend interface -- [Difficulty: 5/5] For making creating and joining servers as easy as possible. This would be any and every sort of GUI to handle information, plus distributing that information both internally and externally
 // Gamerule support -- [Difficulty: 3/5] Add support for adding gamerules to a server, that of which can enforce certain character types, maximum player caps, etc.. This would require both internal and external support
 // Inventory support -- [Difficulty: 3/5] When a client picks up an item, it should be given to everyone (configurable, on by default)
 // Level transfer support -- [Difficulty: 5/5] Add support for transferring a server across levels
-// Save support
+// Save support -- [Difficulty: 3.5/5] Replace save fairy mechanics with a co-op friendly method that doesn't involve using the original save system
 // Enemy support -- [Difficulty: 6/5] Add support for enemies to target specific players. Will require either a full enemy re-code, or something very hacky
 // Spectating support -- [Difficulty: ?/5] Add support for players to toggle between spectating and playing
-// 
-// Bugs:
-// Spawn logic doesn't work without looping
 
 
 class S2MDataAgg extends MInfo
@@ -35,7 +26,7 @@ struct LevelPacketStruct
 	var rotator Rotation;	// The rotation of the actor
 	var float Health;		// The health of the actor
 	var name Anim, State;	// The current animation of the actor, and the current state of the actor
-	var bool bDestructive;	// If true, this packet is requesting to destroy its ID
+	var int iType;			// The type of packet this is. 0=Default,1=Creation,2=Deletion
 };
 
 struct PlayersPacketStruct
@@ -45,14 +36,19 @@ struct PlayersPacketStruct
 	var bool bHost;			// If true, this player packet is the host
 };
 
+struct TranslateStruct
+{
+	var string HostPtr, ClientPtr;	// The string-casted actor pointers across games
+};
+
 var protected array<LevelPacketStruct> InitServerLevelPacket, ClientLevelPacket, ServerLevelPacket;
 var protected array<PlayersPacketStruct> InitServerPlayersPacket, ServerPlayersPacket, ClientPlayersPacket;
 var protected array<string> Events;
-var protected array<Actor> MissingIDBuffer;
+var protected array<TranslateStruct> Translators;
+var protected array<Actor> IgnoreIDBuffer;
 var protected vector vWorldSpawn;
 var protected rotator rWorldSpawn;
 var protected S2MGameRules GR;	// Handle this later, not relevant yet
-var protected int iOldPlayerPacketLength, iPlayerPacketLength, iSimilarActorPacketCheckRadius;
 var protected travel bool bServerStarted;
 var protected bool bLevelLoaded;
 var class<Actor> tClass;
@@ -172,7 +168,10 @@ function ConnectToServer()
 	// Since any new client will always require a new physical player, we create a new player and switch the control of the client HP to the new spawned client
 	// This change will be reflected for all other clients
 	// Make sure this is customizable later on!
+	// Also yes, I know this is hard-coded to Shrek, will be changed.
 	ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID = CreateNewClient(class'Shrek');
+
+	// !? Translate this data.
 	
 	// If applicable, make the newly-connected client assume control of the newly-spawned player pawn
 	if(ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID != U.GetHP() && U.GetHP().IsA('KWPawn'))
@@ -297,7 +296,8 @@ event Tick(float DeltaTime)
 {
 	local array<string> Ds;
 	local Actor A;
-	local int i;
+	local int i, j;
+	local array<string> Ps;
 	
 	if(!bLevelLoaded)
 	{
@@ -322,10 +322,28 @@ event Tick(float DeltaTime)
 	// Handle packets
 	// ...
 	
-	// Update the client level packet if anything changes
-	U.SaveStringArray(FormatLevelPacket(GetClientLevelPacket()), "..\\System\\S2Multi\\ClientLevel.S2M");
+	// Update the client level packet if anything
+	// changes, plus translate this packet to the host.
+	Ps = FormatLevelPacket(GetClientLevelPacket());
+
+	// This is probably expensive with high translator
+	// counts, but how else would you do this?
+	for(i = 0; i < Translators.Length; i++)
+	{
+		for(j = 0; i < Ps.Length; i++)
+		{
+			if(InStr(Ps[j], Translators[i].ClientPtr) != -1)
+			{
+				ReplaceText(Ps[j], Translators[i].ClientPtr, Translators[i].HostPtr);
+
+				break;
+			}
+		}
+	}
+
+	U.SaveStringArray(Ps, "..\\System\\S2Multi\\ClientLevel.S2M");
 	
-	ClearMissingIDBuffer();
+	ClearIgnoreIDBuffer();
 	
 	// See if the server has any new level data sent to the client
 	U.LoadStringArray(Ds, "..\\System\\S2Multi\\ServerLevel.S2M");
@@ -344,14 +362,14 @@ event Tick(float DeltaTime)
 			// Replicate new packet data to client
 			for(i = 0; i < ServerLevelPacket.Length; i++)
 			{
-				AddMissingIDBuffer(ServerLevelPacket[i].ID);
+				AddIgnoreIDBuffer(ServerLevelPacket[i].ID);
 				
 				if(ServerLevelPacket[i].ID == HP)
 				{
 					continue;
 				}
 
-				if(ServerLevelPacket[i].bDestructive)
+				if(ServerLevelPacket[i].iType == 2)
 				{
 					U.FancyDestroy(ServerLevelPacket[i].ID);
 
@@ -479,7 +497,7 @@ function Actor CreateNewClient(class<Actor> C)
 	}
 	
 	// Don't send this data over since it's irrelevant to every other client
-	AddMissingIDBuffer(A);
+	AddIgnoreIDBuffer(A);
 	
 	return A;
 }
@@ -501,19 +519,19 @@ function DisableMovementForOtherPlayers()
 	}
 }
 
-function AddMissingIDBuffer(Actor A) // Should probably rename this
+function AddIgnoreIDBuffer(Actor A)
 {
-	MissingIDBuffer.Insert(MissingIDBuffer.Length, 1);
-	MissingIDBuffer[MissingIDBuffer.Length - 1] = A;
+	IgnoreIDBuffer.Insert(IgnoreIDBuffer.Length, 1);
+	IgnoreIDBuffer[IgnoreIDBuffer.Length - 1] = A;
 }
 
-function bool CheckMissingIDBuffer(Actor A)
+function bool CompareIgnoreIDBuffer(Actor A)
 {
 	local int i;
 	
-	for(i = 0; i < MissingIDBuffer.Length; i++)
+	for(i = 0; i < IgnoreIDBuffer.Length; i++)
 	{
-		if(MissingIDBuffer[i] == A)
+		if(IgnoreIDBuffer[i] == A)
 		{
 			return true;
 		}
@@ -522,9 +540,9 @@ function bool CheckMissingIDBuffer(Actor A)
 	return false;
 }
 
-function ClearMissingIDBuffer()
+function ClearIgnoreIDBuffer()
 {
-	MissingIDBuffer.Remove(0, MissingIDBuffer.Length);
+	IgnoreIDBuffer.Remove(0, IgnoreIDBuffer.Length);
 }
 
 function ProcessEvents()
@@ -725,7 +743,6 @@ function array<LevelPacketStruct> GetClientLevelPacket() // Get the client level
 	local Trigger T;
 	local array<LevelPacketStruct> Ps, RPs;
 	local int i, j;
-	local array<byte> bFound;
 	
 	// Get all relevant actor pointers
 	foreach DynamicActors(class'Mover', M)
@@ -767,81 +784,52 @@ function array<LevelPacketStruct> GetClientLevelPacket() // Get the client level
 	// Extract and format the relevant data from the actor's indexed into a packet
 	Ps = GetRelevantData(As);
 	
-	// Don't check far around in packets if not much has changed, this impacts performance hard at high values
-	iSimilarActorPacketCheckRadius = Max(Abs(InitServerLevelPacket.Length - Ps.Length), 1);
-	
-	bFound.Insert(0, Max(InitServerLevelPacket.Length, Ps.Length));
-	
-	// Scrape the packet for changes from the initialization packet
+	// Scrape the packet for changes from the initialization packet.
+	// 
+	// !? Surely there's a more optimized way to do this?
 	for(i = 0; i < InitServerLevelPacket.Length; i++)
 	{
 		// Destroy check
 		if(InitServerLevelPacket[i].ID == none)
 		{
 			// Actor was destroyed
-			InitServerLevelPacket[i].bDestructive = true;
+			InitServerLevelPacket[i].iType = 2;
 			
 			RPs.Insert(RPs.Length, 1);
 			RPs[RPs.Length - 1] = InitServerLevelPacket[i];
 			
-			// I think this is bad to add
-			// bFound[i] = 1;
-			
 			continue;
 		}
 		
-		// Differ check
-		for(j = Max(i - iSimilarActorPacketCheckRadius, 0); j < Min(i + iSimilarActorPacketCheckRadius, Ps.Length); j++)
+		// Differ check, big performance hit, I think.
+		// 
+		// !? This won't be reachable if InitServerLevelPacket
+		// contains zero data packets, which is bad.
+		for(j = 0; j < Ps.Length; j++)
 		{
 			if(InitServerLevelPacket[i].ID == Ps[j].ID)
 			{
-				bFound[i] = 2;
-				
 				// Actor packet still remains when compared to InitServerLevelPacket
 				// Does it differ?
-				
+
 				if(InitServerLevelPacket[i] != Ps[j])
 				{
-					// Yes it does, write that difference
+					// Yes it does, write that difference.
 					RPs.Insert(RPs.Length, 1);
 					RPs[RPs.Length - 1] = Ps[j];
 				}
 				
-				// No it does not
-				
 				break;
 			}
-		}
-		
-		// 0 == NULL
-		// 1 == False
-		// 2 == True
-		if(bFound[i] == 0)
-		{
-			bFound[i] = 1;
-		}
-	}
-	
-	return RPs;
-	
-	// !? Spawn check, causing memory leak AAAAAAAAAAAAAAAAAAAA
-	for(j = 0; j < Max(InitServerLevelPacket.Length, Ps.Length); j++)
-	{
-		if(bFound[j] == 1)
-		{
-			// For performance sake, this condition is being split
-			if(Ps[j].ID != none)
+			else
 			{
-				// Actor spawned in
+				// If this is true, this actor was
+				// originally spawned, mark it.
+
+				Ps[j].iType = 1;
+
 				RPs.Insert(RPs.Length, 1);
 				RPs[RPs.Length - 1] = Ps[j];
-				
-				// This is the memory leak, it constantly keeps adding onto the init level packet. Happens once I pickup a coin and keeps adding by 1 infinitely
-				// This makes the iteration count go up infinitely, eventually causing the game to lag too much
-				InitServerLevelPacket.Insert(InitServerLevelPacket.Length, 1);
-				InitServerLevelPacket[InitServerLevelPacket.Length - 1] = Ps[j];
-				Log(string(Ps[j].ID));
-				Log(string(InitServerLevelPacket.Length));
 			}
 		}
 	}
@@ -910,13 +898,13 @@ function array<string> FormatLevelPacket(array<LevelPacketStruct> Ps)
 	{
 		// Make sure that any packet being formatted into a level packet originally had a valid ID
 		// If it does not, then we need to not make a level packet with that data, since it would otherwise cause an infinite loop
-		if(CheckMissingIDBuffer(Ps[i].ID))
+		if(CompareIgnoreIDBuffer(Ps[i].ID))
 		{
 			continue;
 		}
 		
 		Ds.Insert(Ds.Length, 1);
-		Ds[Ds.Length - 1] = string(Ps[i].ID) $ "#" $ string(Ps[i].Location) $ "#" $ string(Ps[i].Rotation) $ "#" $ string(Ps[i].Health) $ "#" $ string(Ps[i].Anim) $ "#" $ string(Ps[i].State) $ "#" $ U.BoolToString(Ps[i].bDestructive);
+		Ds[Ds.Length - 1] = string(Ps[i].ID) $ "#" $ string(Ps[i].Location) $ "#" $ string(Ps[i].Rotation) $ "#" $ string(Ps[i].Health) $ "#" $ string(Ps[i].Anim) $ "#" $ string(Ps[i].State) $ "#" $ string(Ps[i].iType);
 	}
 	
 	return Ds;
@@ -940,12 +928,15 @@ function array<LevelPacketStruct> FormatStringLevelPacket(array<string> Ds)
 {
 	local array<LevelPacketStruct> Ps;
 	local array<string> TokenArray;
-	local int i;
+	local int i, j;
+	local bool bTranslated;
 	
 	for(i = 0; i < Ds.Length; i++)
 	{
 		Ps.Insert(Ps.Length, 1);
 		
+		bTranslated = false;
+
 		TokenArray = U.Split(Ds[i], "#");
 		
 		if(TokenArray.Length != 7)
@@ -958,27 +949,72 @@ function array<LevelPacketStruct> FormatStringLevelPacket(array<string> Ds)
 		// Confirm actor ID is present for client
 		// ...
 		
+		// This block of code is responsible for
+		// dynamically spawning actors if needed.
 		if(Ps[i].ID == none)
 		{
-			// The actor pointers don't line up, do your best to find something similar!
-			Ps[i].ID = MissingLevelPacketID(TokenArray[0], Ps[i]);
-			
-			if(Ps[i].ID != none)
+			if(!GetHPPacket().bHost)
 			{
-				// Similar actor found
-				AddMissingIDBuffer(Ps[i].ID);
-				
-				class'S2MVersion'.static.DebugLog("Missing actor ID in level packet. Similar actor nearby, assuming it's the same, might cause issues...");
+				// Check to see if we've seen a pointer
+				// come from the host that needed translation.
+				for(j = 0; j < Translators.Length; j++)
+				{
+					if(Translators[j].HostPtr == TokenArray[0])
+					{
+						// If we're here, we've previously dealt with
+						// this pointer, so let's translate it! :D
+						Ps[i].ID = Actor(FindObject(Translators[j].ClientPtr, class'Actor'));
+
+						bTranslated = true;
+
+						if(Ps[i].ID == none)
+						{
+							class'S2MVersion'.static.DebugLog("A translation error in interpreting a level data packet failed, minor issues will occur!");
+						}
+
+						break;
+					}
+				}
 			}
 			else
 			{
-				// Okay, we didn't find any similar actors, now
-				// we need to physically spawn a new actor in
-				
-				// Ps[i].ID = SmartSpawn(StringActorPointerToClass(TokenArray[0]));
-				// AddMissingIDBuffer(Ps[i].ID);
-				
-				// class'S2MVersion'.static.DebugLog("Missing actor ID in level packet. Spawning in new actor for client, may cause minor temporary displacement or actor duplication...");
+				class'S2MVersion'.static.DebugLog("Received a packet as the host that somehow has an invalid ID, this could be fatal!");
+			}
+
+			if(!bTranslated)
+			{
+				// Don't run the following logic if
+				// we know we're going to spawn an actor.
+				if(int(TokenArray[6]) != 1)
+				{
+					// The actor pointers don't line up, do your best to find something similar!
+					Ps[i].ID = MissingLevelPacketID(TokenArray[0], Ps[i]);
+
+					if(Ps[i].ID != none)
+					{
+						// Similar actor found
+						class'S2MVersion'.static.DebugLog("Missing actor ID in level packet. Similar actor nearby, assuming it's the same, might cause issues...");
+					}
+					else
+					{
+						// Okay, we didn't find any similar actors, now
+						// we need to physically spawn a new actor in.
+						Ps[i].ID = SmartSpawn(StringActorPointerToClass(TokenArray[0]));
+					}
+				}
+				else
+				{
+					Ps[i].ID = SmartSpawn(StringActorPointerToClass(TokenArray[0]));
+				}
+
+				if(!GetHPPacket().bHost)
+				{
+					// If client, make a translator
+					// for this ID we had to spawn.
+					Translators.Insert(Translators.Length, 1);
+					Translators[Translators.Length - 1].HostPtr = TokenArray[0];
+					Translators[Translators.Length - 1].ClientPtr = string(Ps[i].ID);
+				}
 			}
 		}
 		
@@ -987,7 +1023,7 @@ function array<LevelPacketStruct> FormatStringLevelPacket(array<string> Ds)
 		Ps[i].Health = float(TokenArray[3]);
 		Ps[i].Anim = U.SName(TokenArray[4]);
 		Ps[i].State = U.SName(TokenArray[5]);
-		Ps[i].bDestructive = bool(TokenArray[6]);
+		Ps[i].iType = int(TokenArray[6]);
 	}
 	
 	return Ps;
@@ -998,6 +1034,8 @@ function Actor MissingLevelPacketID(string ID, LevelPacketStruct Ps)
 	local Actor A;
 	local name nClass;
 	local array<string> TokenArray;
+
+	// !? This logic might be unnecessary, unsure.
 	
 	TokenArray = U.Split(ID, ".");
 	
