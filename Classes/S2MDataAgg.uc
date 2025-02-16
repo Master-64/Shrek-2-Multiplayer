@@ -116,6 +116,10 @@ function StartServer(int Port)
 	
 	class'S2MVersion'.static.DebugLog("Initialization packet created by" @ GetHPPacket().Username);
 	class'S2MVersion'.static.DebugLog("Server starting up...");
+
+	// This is the point where we'd initialize the gamerule logic
+	// I'm not going to do that yet, since it's currently not relevant
+	// class'S2MVersion'.static.DebugLog("Initializing gamerules...");
 	
 	bServerStarted = true;
 }
@@ -165,23 +169,7 @@ function ConnectToServer()
 	
 	ClientPlayersPacket.Insert(ClientPlayersPacket.Length, 1);
 	ClientPlayersPacket[ClientPlayersPacket.Length - 1].Username = class'S2MConfig'.default.sUsername;
-	// Since any new client will always require a new physical player, we create a new player and switch the control of the client HP to the new spawned client
-	// This change will be reflected for all other clients
-	// Make sure this is customizable later on!
-	// Also yes, I know this is hard-coded to Shrek, will be changed.
-	ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID = CreateNewClient(class'Shrek');
-
-	// !? Translate this data.
-	
-	// If applicable, make the newly-connected client assume control of the newly-spawned player pawn
-	if(ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID != U.GetHP() && U.GetHP().IsA('KWPawn'))
-	{
-		// This might be too hacky to include for long?
-		ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID.Tag = ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID.Name;
-		ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID.SetPropertyText("Label", string(ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID.Name));
-		
-		KWPawn(U.GetHP()).SwitchControlToPawn(ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID.GetPropertyText("Label"));
-	}
+	ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID = U.GetHP();
 	
 	UpdateClientPlayersPacket();
 	
@@ -250,8 +238,6 @@ function PlayersPacketStruct GetHPPacket()
 {
 	local int i;
 	
-	ReadInitServerPlayers();
-	
 	HP = U.GetHP();
 	
 	for(i = 0; i < InitServerPlayersPacket.Length; i++)
@@ -268,8 +254,6 @@ function PlayersPacketStruct GetHPPacket()
 function PlayersPacketStruct GetHostPacket()
 {
 	local int i;
-	
-	ReadInitServerPlayers();
 	
 	for(i = 0; i < InitServerPlayersPacket.Length; i++)
 	{
@@ -404,6 +388,9 @@ event Tick(float DeltaTime)
 			class'S2MVersion'.static.DebugLog("Received player data packet with a size of" @ string(Ds.Length) @ "from server, replicating packet to client...");
 			
 			ServerPlayersPacket = FormatStringPlayersPacket(Ds);
+			InitServerPlayersPacket = ServerPlayersPacket;
+
+			UpdateInitServerPlayersPacket();
 			
 			// React to server player packet being received
 			// ...
@@ -411,17 +398,10 @@ event Tick(float DeltaTime)
 			// Replicate new packet data to client
 			// ...
 			
-			for(i = 0; i < ServerPlayersPacket.Length; i++)
-			{
-				if(ServerPlayersPacket[i].ID == none)
-				{
-					// Create new client since the client doesn't physically exist for this client yet
-					// ...
-					
-					// Make sure this is customizable later on!
-					ServerPlayersPacket[i].ID = CreateNewClient(class'Shrek');
-				}
-			}
+			// for(i = 0; i < ServerPlayersPacket.Length; i++)
+			// {
+			// 	
+			// }
 			
 			// Empty server packet for client (performance reasons)
 			ServerPlayersPacket.Remove(0, ServerPlayersPacket.Length);
@@ -1115,7 +1095,8 @@ function array<PlayersPacketStruct> FormatStringPlayersPacket(array<string> Ds)
 {
 	local array<PlayersPacketStruct> Ps;
 	local array<string> TokenArray;
-	local int i;
+	local int i, j;
+	local bool bTranslated;
 	
 	for(i = 0; i < Ds.Length; i++)
 	{
@@ -1127,6 +1108,67 @@ function array<PlayersPacketStruct> FormatStringPlayersPacket(array<string> Ds)
 		{
 			class'S2MVersion'.static.DebugLog("Player data packet is not formatted correctly, issues may arise...");
 		}
+
+		Ps[i].ID = Actor(FindObject(TokenArray[0], class'Actor'));
+		
+		// Confirm actor ID is present for client
+		// ...
+		
+		// This block of code is responsible for
+		// dynamically spawning actors if needed.
+		if(Ps[i].ID == none)
+		{
+			if(!GetHPPacket().bHost)
+			{
+				// Check to see if we've seen a pointer
+				// come from the host that needed translation.
+				for(j = 0; j < Translators.Length; j++)
+				{
+					if(Translators[j].HostPtr == TokenArray[0])
+					{
+						// If we're here, we've previously dealt with
+						// this pointer, so let's translate it! :D
+						Ps[i].ID = Actor(FindObject(Translators[j].ClientPtr, class'Actor'));
+
+						bTranslated = true;
+
+						if(Ps[i].ID == none)
+						{
+							class'S2MVersion'.static.DebugLog("A translation error in interpreting a player data packet failed, minor issues will occur!");
+						}
+
+						break;
+					}
+				}
+			}
+			else
+			{
+				class'S2MVersion'.static.DebugLog("Received a packet as the host that somehow has an invalid ID, this could be fatal!");
+			}
+
+			if(!bTranslated)
+			{
+				Ps[i].ID = CreateNewClient(StringActorPointerToClass(TokenArray[0]));
+
+				// Make sure the client understands
+				// this is a new player. This logic
+				// is done here due to priorities.
+				ClientPlayersPacket.Insert(ClientPlayersPacket.Length, 1);
+				ClientPlayersPacket[ClientPlayersPacket.Length - 1].Username = TokenArray[1];
+				ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID = Ps[i].ID;
+				
+				UpdateClientPlayersPacket();
+
+				if(!GetHPPacket().bHost)
+				{
+					// If client, make a translator
+					// for this ID we had to spawn.
+					Translators.Insert(Translators.Length, 1);
+					Translators[Translators.Length - 1].HostPtr = TokenArray[0];
+					Translators[Translators.Length - 1].ClientPtr = string(Ps[i].ID);
+				}
+			}
+		}
 		
 		Ps[i].ID = Actor(FindObject(TokenArray[0], class'Actor'));
 		Ps[i].Username = TokenArray[1];
@@ -1134,6 +1176,16 @@ function array<PlayersPacketStruct> FormatStringPlayersPacket(array<string> Ds)
 	}
 	
 	return Ps;
+}
+
+function TranslatorDebug()
+{
+	local int i;
+
+	for(i = 0; i < Translators.Length; i++)
+	{
+		class'S2MVersion'.static.DebugLog("Translator" @ string(i) $ ": Host is" @ Translators[i].HostPtr $ ", client is" @ Translators[i].ClientPtr);
+	}
 }
 
 
