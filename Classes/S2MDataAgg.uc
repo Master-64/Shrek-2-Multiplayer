@@ -26,7 +26,6 @@ struct LevelPacketStruct
 	var rotator Rotation;	// The rotation of the actor
 	var float Health;		// The health of the actor
 	var name Anim, State;	// The current animation of the actor, and the current state of the actor
-	var int iType;			// The type of packet this is. 0=Default,1=Creation,2=Deletion
 };
 
 struct PlayersPacketStruct
@@ -352,13 +351,6 @@ event Tick(float DeltaTime)
 				{
 					continue;
 				}
-
-				if(ServerLevelPacket[i].iType == 2)
-				{
-					U.FancyDestroy(ServerLevelPacket[i].ID);
-
-					continue;
-				}
 				
 				U.MFancySetLocation(ServerLevelPacket[i].ID, ServerLevelPacket[i].Location);
 				U.FancySetRotation(ServerLevelPacket[i].ID, ServerLevelPacket[i].Rotation);
@@ -527,8 +519,9 @@ function ClearIgnoreIDBuffer()
 
 function ProcessEvents()
 {
-	local int i;
+	local int i, j;
 	local array<string> TokenArray;
+	local array<LevelPacketStruct> Ps;
 	local bool B;
 	
 	if(Events.Length > 0)
@@ -580,6 +573,54 @@ function ProcessEvents()
 					UpdateInitServerLevelPacket();
 					UpdateInitServerPlayersPacket();
 					
+					break;
+				case "HOST_CREATE": // External
+					TokenArray.Remove(0, 1);
+
+					InitServerLevelPacket.Insert(InitServerLevelPacket.Length, 1);
+					InitServerLevelPacket[InitServerLevelPacket.Length - 1] = FormatStringLevelPacket(TokenArray)[0];
+
+					break;
+				case "CLIENT_CREATE": // External
+					TokenArray.Remove(0, 1);
+
+					Ps = FormatStringLevelPacket(TokenArray);
+
+					InitServerLevelPacket.Insert(InitServerLevelPacket.Length, 1);
+					InitServerLevelPacket[InitServerLevelPacket.Length - 1] = Ps[0];
+
+					Ps[0].ID = SmartSpawn(StringActorPointerToClass(TokenArray[0]));
+
+					Translators.Insert(Translators.Length, 1);
+					Translators[Translators.Length - 1].HostPtr = TokenArray[0];
+					Translators[Translators.Length - 1].ClientPtr = string(Ps[0].ID);
+
+					break;
+				case "HOST_DESTROY": // External
+					TokenArray.Remove(0, 1);
+
+					U.FancyDestroy(FormatStringLevelPacket(TokenArray)[0].ID);
+
+					ReadInitServerLevel();
+
+					break;
+				case "CLIENT_DESTROY": // External
+					TokenArray.Remove(0, 1);
+
+					for(j = 0; j < Translators.Length; j++)
+					{
+						if(InStr(TokenArray[0], Translators[j].ClientPtr) != -1)
+						{
+							ReplaceText(TokenArray[0], Translators[j].ClientPtr, Translators[j].HostPtr);
+
+							break;
+						}
+					}
+
+					U.FancyDestroy(FormatStringLevelPacket(TokenArray)[0].ID);
+
+					UpdateInitServerLevelPacket();
+
 					break;
 				case "CHANGELEVEL":
 					U.ChangeLevel(Mid(Events[i], Len(TokenArray[0]) + 1));
@@ -774,36 +815,43 @@ function array<LevelPacketStruct> GetClientLevelPacket() // Get the client level
 		if(InitServerLevelPacket[i].ID == none)
 		{
 			// Actor was destroyed
-			InitServerLevelPacket[i].iType = 2;
-			
-			RPs.Insert(RPs.Length, 1);
-			RPs[RPs.Length - 1] = InitServerLevelPacket[i];
+			if(GetHostPacket().bHost)
+			{
+				FireClientEvent("HOST_DESTROY" @ FormatSingleLevelPacket(InitServerLevelPacket[i]));
+			}
+			else
+			{
+				FireClientEvent("CLIENT_DESTROY" @ FormatSingleLevelPacket(InitServerLevelPacket[i]));
+			}
 
 			InitServerLevelPacket.Remove(i, 1);
 
 			i--;
-			
+
 			continue;
 		}
-		
+	}
+	
+	for(i = 0; i < Ps.Length; i++)
+	{	
 		// Differ check, big performance hit, I think.
 		// 
 		// !? This won't be reachable if InitServerLevelPacket
 		// contains zero data packets, which is bad.
-		for(j = 0; j < Ps.Length; j++)
+		for(j = 0; j < InitServerLevelPacket.Length; j++)
 		{
-			if(InitServerLevelPacket[i].ID == Ps[j].ID)
+			if(Ps[i].ID == InitServerLevelPacket[j].ID)
 			{
 				bFound = true;
 
 				// Actor packet still remains when compared to InitServerLevelPacket
 				// Does it differ?
 
-				if(InitServerLevelPacket[i] != Ps[j])
+				if(Ps[i] != InitServerLevelPacket[j])
 				{
 					// Yes it does, write that difference.
 					RPs.Insert(RPs.Length, 1);
-					RPs[RPs.Length - 1] = Ps[j];
+					RPs[RPs.Length - 1] = InitServerLevelPacket[j];
 				}
 				
 				break;
@@ -812,13 +860,15 @@ function array<LevelPacketStruct> GetClientLevelPacket() // Get the client level
 
 		if(!bFound)
 		{
-			// If this is true, this actor was
-			// originally spawned, mark it.
-
-			Ps[j].iType = 1;
-
-			RPs.Insert(RPs.Length, 1);
-			RPs[RPs.Length - 1] = Ps[j];
+			// Actor is being spawned
+			if(GetHostPacket().bHost)
+			{
+				FireClientEvent("HOST_CREATE" @ FormatSingleLevelPacket(Ps[i]));
+			}
+			else
+			{
+				FireClientEvent("CLIENT_CREATE" @ FormatSingleLevelPacket(Ps[i]));
+			}
 		}
 	}
 	
@@ -892,10 +942,22 @@ function array<string> FormatLevelPacket(array<LevelPacketStruct> Ps)
 		}
 		
 		Ds.Insert(Ds.Length, 1);
-		Ds[Ds.Length - 1] = string(Ps[i].ID) $ "#" $ string(Ps[i].Location) $ "#" $ string(Ps[i].Rotation) $ "#" $ string(Ps[i].Health) $ "#" $ string(Ps[i].Anim) $ "#" $ string(Ps[i].State) $ "#" $ string(Ps[i].iType);
+		Ds[Ds.Length - 1] = string(Ps[i].ID) $ "#" $ string(Ps[i].Location) $ "#" $ string(Ps[i].Rotation) $ "#" $ string(Ps[i].Health) $ "#" $ string(Ps[i].Anim) $ "#" $ string(Ps[i].State);
 	}
 	
 	return Ds;
+}
+
+function string FormatSingleLevelPacket(LevelPacketStruct Ps)
+{
+	// Make sure that any packet being formatted into a level packet originally had a valid ID
+	// If it does not, then we need to not make a level packet with that data, since it would otherwise cause an infinite loop
+	if(CompareIgnoreIDBuffer(Ps.ID))
+	{
+		return "";
+	}
+	
+	return string(Ps.ID) $ "#" $ string(Ps.Location) $ "#" $ string(Ps.Rotation) $ "#" $ string(Ps.Health) $ "#" $ string(Ps.Anim) $ "#" $ string(Ps.State);
 }
 
 function array<string> FormatPlayersPacket(array<PlayersPacketStruct> Ps)
@@ -971,38 +1033,9 @@ function array<LevelPacketStruct> FormatStringLevelPacket(array<string> Ds)
 
 			if(!bTranslated)
 			{
-				// Don't run the following logic if
-				// we know we're going to spawn an actor.
-				if(int(TokenArray[6]) != 1)
-				{
-					// The actor pointers don't line up, do your best to find something similar!
-					Ps[i].ID = MissingLevelPacketID(TokenArray[0], Ps[i]);
+				class'S2MVersion'.static.DebugLog("Received an unknown level data packet, ignoring...");
 
-					if(Ps[i].ID != none)
-					{
-						// Similar actor found
-						class'S2MVersion'.static.DebugLog("Missing actor ID in level packet. Similar actor nearby, assuming it's the same, might cause issues...");
-					}
-					else
-					{
-						// Okay, we didn't find any similar actors, now
-						// we need to physically spawn a new actor in.
-						Ps[i].ID = SmartSpawn(StringActorPointerToClass(TokenArray[0]));
-					}
-				}
-				else
-				{
-					Ps[i].ID = SmartSpawn(StringActorPointerToClass(TokenArray[0]));
-				}
-
-				if(!GetHPPacket().bHost)
-				{
-					// If client, make a translator
-					// for this ID we had to spawn.
-					Translators.Insert(Translators.Length, 1);
-					Translators[Translators.Length - 1].HostPtr = TokenArray[0];
-					Translators[Translators.Length - 1].ClientPtr = string(Ps[i].ID);
-				}
+				continue;
 			}
 		}
 		
@@ -1011,7 +1044,6 @@ function array<LevelPacketStruct> FormatStringLevelPacket(array<string> Ds)
 		Ps[i].Health = float(TokenArray[3]);
 		Ps[i].Anim = U.SName(TokenArray[4]);
 		Ps[i].State = U.SName(TokenArray[5]);
-		Ps[i].iType = int(TokenArray[6]);
 	}
 	
 	return Ps;
@@ -1156,25 +1188,9 @@ function array<PlayersPacketStruct> FormatStringPlayersPacket(array<string> Ds)
 
 			if(!bTranslated)
 			{
-				Ps[i].ID = CreateNewClient(StringActorPointerToClass(TokenArray[0]));
+				class'S2MVersion'.static.DebugLog("Received an unknown player data packet, ignoring...");
 
-				// Make sure the client understands
-				// this is a new player. This logic
-				// is done here due to priorities.
-				ClientPlayersPacket.Insert(ClientPlayersPacket.Length, 1);
-				ClientPlayersPacket[ClientPlayersPacket.Length - 1].Username = TokenArray[1];
-				ClientPlayersPacket[ClientPlayersPacket.Length - 1].ID = Ps[i].ID;
-				
-				UpdateClientPlayersPacket();
-
-				if(!GetHPPacket().bHost)
-				{
-					// If client, make a translator
-					// for this ID we had to spawn.
-					Translators.Insert(Translators.Length, 1);
-					Translators[Translators.Length - 1].HostPtr = TokenArray[0];
-					Translators[Translators.Length - 1].ClientPtr = string(Ps[i].ID);
-				}
+				continue;
 			}
 		}
 		
