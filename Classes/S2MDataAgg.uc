@@ -723,6 +723,7 @@ function array<LevelPacketStruct> GetClientLevelPacket() // Get the client level
 	local Trigger T;
 	local array<LevelPacketStruct> Ps, RPs;
 	local int i, j;
+	local bool bFound;
 	
 	// Get all relevant actor pointers
 	foreach DynamicActors(class'Mover', M)
@@ -777,6 +778,10 @@ function array<LevelPacketStruct> GetClientLevelPacket() // Get the client level
 			
 			RPs.Insert(RPs.Length, 1);
 			RPs[RPs.Length - 1] = InitServerLevelPacket[i];
+
+			InitServerLevelPacket.Remove(i, 1);
+
+			i--;
 			
 			continue;
 		}
@@ -789,6 +794,8 @@ function array<LevelPacketStruct> GetClientLevelPacket() // Get the client level
 		{
 			if(InitServerLevelPacket[i].ID == Ps[j].ID)
 			{
+				bFound = true;
+
 				// Actor packet still remains when compared to InitServerLevelPacket
 				// Does it differ?
 
@@ -801,16 +808,17 @@ function array<LevelPacketStruct> GetClientLevelPacket() // Get the client level
 				
 				break;
 			}
-			else
-			{
-				// If this is true, this actor was
-				// originally spawned, mark it.
+		}
 
-				Ps[j].iType = 1;
+		if(!bFound)
+		{
+			// If this is true, this actor was
+			// originally spawned, mark it.
 
-				RPs.Insert(RPs.Length, 1);
-				RPs[RPs.Length - 1] = Ps[j];
-			}
+			Ps[j].iType = 1;
+
+			RPs.Insert(RPs.Length, 1);
+			RPs[RPs.Length - 1] = Ps[j];
 		}
 	}
 	

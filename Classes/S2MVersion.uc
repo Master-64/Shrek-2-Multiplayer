@@ -25,7 +25,7 @@ static function DebugLog(string S)
 
 defaultproperties
 {
-	Version="Build 4 [Alpha]"
+	Version="Build 5 [Alpha]"
 	ModName="S2M"
 	bDebugEnabled=true
 }
